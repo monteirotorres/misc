@@ -1,0 +1,195 @@
+#!/bin/bash
+echo
+echo "##############################################"
+echo "#              Make ROC + AUC                #"
+echo "#       TORRES, P.H.M. and GOMES, D.E.       #"
+echo "#                26-11-2017                  #"
+echo "##############################################"
+echo "#                                            #"
+echo "#   Creates a table containing Sensitivity   #"
+echo "#  and 1-Specificity for each tested cutoff  #"
+echo "#  Also provides the AUC and Youden Cut-off  #"
+echo "#                                            #"
+echo "##############################################"
+echo "#                                            #"
+echo "# Usage:                                     #"
+echo "#    ./makeroc                               #"
+echo "#                                            #"
+echo "##############################################"
+###############
+# Colect params
+###############
+
+export LC_NUMERIC=en_US.UTF-8
+
+echo "
+Please provide a file in which the first column correspond to the name of the ligand and the second column corresponds to the binding energy"
+read -e -p "Mainfile: " mainfile
+
+echo "
+Please state the fix part of the actives name"
+read -e -p "Actives string: " actives
+
+echo "
+Please state the fix part of the decoys name"
+read -e -p "Decoys string: " decoys
+
+echo "
+How many points should there be in your ROC curve?"
+read -e -p "Number of points: " points
+
+echo "
+Inform a tag for the output files."
+read -e -p "Tag: " tag
+
+echo
+
+let points=${points}-1
+
+########################
+# Sort by binding energy
+########################
+
+sort -n -k2 ${mainfile} > mainsorted.tmp
+
+###################
+# Write active file
+###################
+
+fgrep ${actives} ${mainfile} > actives.tmp
+fgrep ${decoys}  ${mainfile} > decoys.tmp
+
+###########################################
+# Best energy, worst energy, range and step
+###########################################
+
+best=`head -n1 mainsorted.tmp | awk '{print $2}'`
+worst=`tail -n1 mainsorted.tmp | awk '{print $2}'`
+range=`echo|awk -v best=$best -v worst=$worst '{print best-worst}' OFMT='%.6f'`
+step=`echo|awk -v points=$points -v range=$range '{print range/points}' OFMT='%.6f'`
+
+############################
+# Number of active and decoys
+############################
+
+activetot=`wc -l  actives.tmp |awk '{print $1}'`
+decoytot=` wc -l  decoys.tmp  |awk '{print $1}'`
+
+#############################
+# Calculate Specificity and 
+# Sensitivity for each cutoff
+#############################
+
+cutoff=$worst
+
+let points=${points}+1
+
+for i in `seq 1 $points`; do
+	tn=0
+	tp=0
+	echo ${cutoff} >> cutoff.tmp
+	
+     a=0
+    a=`awk -v cutoff=${cutoff} '$2<=cutoff' actives.tmp |wc -l`
+    a=`echo ${a}`
+    let tp=${tp}+${a}
+
+     d=0
+    d=`awk -v cutoff=${cutoff} '$2>cutoff' decoys.tmp |wc -l`
+    d=`echo ${d}`
+    let tn=${tn}+${d}
+
+  echo ${cutoff} ${tp} ${tn} 
+        
+  echo "$tp/$activetot" | bc -l >> sensitivity.tmp
+    echo "1-($tn/$decoytot)" | bc -l >> 1-specificity.tmp
+	cutoff=`echo $worst + $i*$step | bc`
+done
+echo -e "Cutoff\t1-Specificity\tSensitivity" > ROC-${tag}.txt
+paste cutoff.tmp 1-specificity.tmp sensitivity.tmp >> ROC-${tag}.txt
+
+########################
+# Calculate Youden index  
+# and associated cut-off
+########################
+ 
+yindex=`tail -n +2 ROC-${tag}.txt | awk '{print $1, (1-$2)+$3}' | LC_NUMERIC=en_US.UTF-8  sort -n -k 2 | tail -n 1 | awk '{print $2-1}'`
+ycutoff=`tail -n +2 ROC-${tag}.txt | awk '{print $1, (1-$2)+$3}' | LC_NUMERIC=en_US.UTF-8  sort -n -k 2 | tail -n 1 | awk '{print $1}'`
+yxy=`tail -n +2 ROC-${tag}.txt | awk '{print $1, (1-$2)+$3, $2, $3}' | LC_NUMERIC=en_US.UTF-8  sort -n -k 2 | tail -n 1 | awk '{print "("$3,", "$4")"}'`
+
+########################
+# Write .xvg file
+########################
+
+echo -e "
+@    title \"ROC Curve\"
+@    xaxis  label \"1-Specificity\"
+@    yaxis  label \"Sensitivity\"
+@TYPE xy
+@    s0 symbol 2
+@    s0 symbol size 0.3
+@    s0 linestyle 1
+" > ROC-${tag}.xvg
+
+paste 1-specificity.tmp sensitivity.tmp >> ROC-${tag}.xvg
+
+########################
+# Calculate AUC
+########################
+
+tail -n +10 ROC-${tag}.xvg | tac > ROCinv.tmp
+
+let points=${points}-1
+
+for i in `seq 1 ${points}`;do
+    ax=`sed -n ${i}p ROCinv.tmp | awk '{print $1}'`
+    ay=`sed -n ${i}p ROCinv.tmp | awk '{print $2}'`
+    let i=i+1
+    bx=`sed -n ${i}p ROCinv.tmp | awk '{print $1}'`
+    by=`sed -n ${i}p ROCinv.tmp | awk '{print $2}'`
+    echo ${ax} ${ay} ${bx} ${by}
+done > aucpoints.tmp
+
+auc=`awk '{printf "%11.10f\n", (($3-$1)*($2+$4))/2}' aucpoints.tmp | paste -sd+ | bc`
+
+let points=${points}+1
+
+######################
+# Write log
+######################
+
+echo -e "
+####################################
+MAKEROC RESULTS
+####################################
+
+    Best score = ${best}
+   Worst score = ${worst}
+   Score range = ${range}
+  N. of Points = ${points}
+          Step = ${step}
+Positive total = ${activetot}
+Negative total = ${decoytot}
+           AUC = ${auc}
+  Youden index = ${yindex}
+ Youden cutoff = ${ycutoff}
+  Youden (x,y) = ${yxy}
+
+          Date = `date`
+     Directory = $PWD
+   Text output = ROC-${tag}.txt
+    XVG output = ROC-${tag}.xvg
+       Logfile = makeroc-${tag}.log
+
+####################################
+" > makeroc-${tag}.log
+
+cat makeroc-${tag}.log
+
+######################
+# Clean stuff
+######################
+
+rm -rf sensitivity.tmp 1-specificity.tmp cutoff.tmp mainsorted.tmp ROCinv.tmp aucpoints.tmp
+
+exit
